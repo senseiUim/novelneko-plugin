@@ -6,7 +6,7 @@ const mangayomiSources = [{
   "iconUrl": "https://raw.githubusercontent.com/senseiUim/novelneko-plugin/main/icon.png",
   "typeSource": "single",
   "itemType": 2,
-  "version": "0.0.1",
+  "version": "0.0.2",
   "dateFormat": "",
   "dateFormatLocale": "",
   "pkgPath": "novelneko_mangayomi.js",
@@ -63,12 +63,52 @@ class DefaultExtension extends MProvider {
     return 5;
   }
 
+  /**
+   * The app decodes a response as Latin-1 when the server does not announce
+   * a charset, which turns "é" into "Ã©". Detect that and put the UTF-8 back.
+   * Text that is already correct is returned untouched (it is not valid
+   * UTF-8 once re-read byte by byte, so the repair is rejected).
+   */
+  repairEncoding(text) {
+    const s = String(text || "");
+    if (!/[\u0080-ÿ]/.test(s) && !/[ŒœŠšŸŽžƒˆ˜–-›€™]/.test(s)) {
+      return s; // plain ASCII: nothing to repair
+    }
+    // Characters Windows-1252 places where Latin-1 has control codes (0x80-0x9f).
+    const cp1252 = {
+      "€": 0x80, "‚": 0x82, "ƒ": 0x83, "„": 0x84, "…": 0x85,
+      "†": 0x86, "‡": 0x87, "ˆ": 0x88, "‰": 0x89, "Š": 0x8a,
+      "‹": 0x8b, "Œ": 0x8c, "Ž": 0x8e, "‘": 0x91, "’": 0x92,
+      "“": 0x93, "”": 0x94, "•": 0x95, "–": 0x96, "—": 0x97,
+      "˜": 0x98, "™": 0x99, "š": 0x9a, "›": 0x9b, "œ": 0x9c,
+      "ž": 0x9e, "Ÿ": 0x9f,
+    };
+    let encoded = "";
+    for (let i = 0; i < s.length; i++) {
+      const ch = s.charAt(i);
+      const code = s.charCodeAt(i);
+      let byte = -1;
+      if (code < 0x80 && ch !== "%") encoded += ch;
+      else if (ch === "%") encoded += "%25";
+      else if (code <= 0xff) byte = code;
+      else if (cp1252[ch] !== undefined) byte = cp1252[ch];
+      else return s; // a character no single-byte charset has: already proper text
+      if (byte >= 0) encoded += "%" + ("0" + byte.toString(16)).slice(-2);
+    }
+    try {
+      const fixed = decodeURIComponent(encoded);
+      return fixed.indexOf("�") < 0 ? fixed : s;
+    } catch (e) {
+      return s; // not valid UTF-8: the text was fine as it was
+    }
+  }
+
   async get(url) {
     const res = await new Client().get(url);
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw new Error("HTTP " + res.statusCode + " en chargeant " + url);
     }
-    return res.body;
+    return this.repairEncoding(res.body);
   }
 
   /** The whole catalogue is one JSON file: [{title, image, link, subtitle}]. */
@@ -278,7 +318,7 @@ class DefaultExtension extends MProvider {
       try {
         const res = await new Client().get(this.source.baseUrl + "/webnovels/" + slug + "/chapters/" + file);
         if (res.statusCode < 200 || res.statusCode >= 300) continue;
-        text = res.body;
+        text = this.repairEncoding(res.body);
       } catch (e) {
         continue;
       }
