@@ -6,7 +6,7 @@ const mangayomiSources = [{
   "iconUrl": "https://raw.githubusercontent.com/senseiUim/novelneko-plugin/main/icon.png",
   "typeSource": "single",
   "itemType": 2,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "dateFormat": "",
   "dateFormatLocale": "",
   "pkgPath": "novelneko_mangayomi.js",
@@ -44,14 +44,27 @@ class DefaultExtension extends MProvider {
     return this.source.baseUrl + (baseDir || "/webnovels/") + value.replace(/^\.\//, "");
   }
 
+  /** "webnovels" or "lightnovels", read from a URL or a stored path. */
+  sectionOf(link) {
+    return /\/lightnovels\//i.test(String(link || "")) ? "lightnovels" : "webnovels";
+  }
+
   /** Novel folder name from a catalogue link, a full URL or a stored path. */
   slugOf(link) {
     const slug = String(link || "")
       .replace(/^https?:\/\/[^\/]+/i, "")
       .replace(/^\.?\/?/, "")
-      .replace(/^webnovels\//, "")
+      .replace(/^(webnovels|lightnovels)\//, "")
       .split(/[\/?#]/)[0];
     return slug ? slug : null;
+  }
+
+  /** "02/06/2025" -> milliseconds since epoch as a string, or null. */
+  parseDate(text) {
+    const m = String(text || "").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (!m) return null;
+    const t = new Date(parseInt(m[3], 10), parseInt(m[2], 10) - 1, parseInt(m[1], 10)).getTime();
+    return isNaN(t) ? null : String(t);
   }
 
   toStatus(status) {
@@ -111,16 +124,17 @@ class DefaultExtension extends MProvider {
     return this.repairEncoding(res.body);
   }
 
-  /** The whole catalogue is one JSON file: [{title, image, link, subtitle}]. */
-  async catalog() {
-    const body = await this.get(this.source.baseUrl + "/webnovels/webnovel.json?v=" + Date.now());
+  /** One catalogue file per section: [{title, image, link, subtitle}]. */
+  async catalogOf(section) {
+    const file = section === "lightnovels" ? "lightnovel.json" : "webnovel.json";
+    const body = await this.get(this.source.baseUrl + "/" + section + "/" + file + "?v=" + Date.now());
     let entries;
     try {
       entries = JSON.parse(body);
     } catch (e) {
-      throw new Error("webnovel.json illisible");
+      throw new Error(file + " illisible");
     }
-    if (!Array.isArray(entries)) throw new Error("Format inattendu pour webnovel.json");
+    if (!Array.isArray(entries)) throw new Error("Format inattendu pour " + file);
 
     const list = [];
     for (const entry of entries) {
@@ -128,11 +142,26 @@ class DefaultExtension extends MProvider {
       if (!slug || !entry.title) continue;
       list.push({
         name: entry.title,
-        imageUrl: entry.image ? this.toAbsolute(entry.image) : "",
-        link: this.source.baseUrl + "/webnovels/" + slug + "/",
+        imageUrl: entry.image ? this.toAbsolute(entry.image, "/" + section + "/") : "",
+        link: this.source.baseUrl + "/" + section + "/" + slug + "/",
       });
     }
     return list;
+  }
+
+  /** Web novels then light novels. One section failing must not hide the other. */
+  async catalog() {
+    const lists = [];
+    let firstError = null;
+    for (const section of ["webnovels", "lightnovels"]) {
+      try {
+        lists.push(await this.catalogOf(section));
+      } catch (e) {
+        if (!firstError) firstError = e;
+      }
+    }
+    if (lists.length === 0) throw firstError;
+    return [].concat.apply([], lists);
   }
 
   /**
@@ -196,10 +225,48 @@ class DefaultExtension extends MProvider {
 
   // ----------------------------------------------------------- novel + text
 
+  /** Light novels: the volumes are listed in the page as PDF links, newest first. */
+  volumesOf(doc, html, baseDir) {
+    const volumes = [];
+    const seen = {};
+    const add = (href, name, date) => {
+      if (!href || seen[href]) return;
+      seen[href] = true;
+      volumes.push({
+        name: name || href.replace(/^.*\//, "").replace(/\.pdf$/i, ""),
+        url: this.toAbsolute(href, baseDir),
+        dateUpload: this.parseDate(date),
+        scanlator: null,
+      });
+    };
+    for (const item of doc.select(".chapter-item")) {
+      const link = item.selectFirst("a");
+      add(link.attr("href"), link.text.trim(), item.selectFirst("span").text);
+    }
+    if (volumes.length === 0) {
+      const re = /<a[^>]+href="([^"]+\.pdf)"[^>]*>([^<]*)<\/a>/gi;
+      let m;
+      while ((m = re.exec(html)) !== null) {
+        const label = m[2].trim();
+        if (/^(premier|dernier)/i.test(label)) continue;
+        add(m[1], label, "");
+      }
+    }
+    // Highest tome number first (8, 7.5, 7, ...), as the app expects newest first.
+    const num = (v) => {
+      const m = String(v.name).match(/(\d+(?:[.,]\d+)?)/);
+      return m ? parseFloat(m[1].replace(",", ".")) : null;
+    };
+    if (volumes.every((v) => num(v) !== null)) volumes.sort((a, b) => num(b) - num(a));
+    return volumes;
+  }
+
   async getDetail(url) {
+    const section = this.sectionOf(url);
     const slug = this.slugOf(url);
     if (!slug) throw new Error("Adresse de roman invalide : " + url);
-    const novelUrl = this.source.baseUrl + "/webnovels/" + slug + "/";
+    const baseDir = "/" + section + "/" + slug + "/";
+    const novelUrl = this.source.baseUrl + baseDir;
 
     const html = await this.get(novelUrl);
     const doc = new Document(html);
@@ -222,9 +289,10 @@ class DefaultExtension extends MProvider {
       name = doc.selectFirst("title").text.replace(/\s*[-–—]\s*NovelNeko\s*$/i, "").trim();
     }
     const cover = doc.selectFirst(".cover").attr("src");
-    const imageUrl = cover ? this.toAbsolute(cover, "/webnovels/" + slug + "/") : novelUrl + "cover.jpg";
+    const imageUrl = cover ? this.toAbsolute(cover, baseDir) : novelUrl + "cover.jpg";
 
     // Synopsis: every line after "Synopsis :" up to the buttons below it.
+    const endOfSynopsis = /^(Premier (chapitre|tome)|Dernier (chapitre|tome)|Chapitres disponibles|Tomes? disponibles)/i;
     let description = "";
     let start = -1;
     for (let i = 0; i < lines.length && start < 0; i++) {
@@ -233,7 +301,7 @@ class DefaultExtension extends MProvider {
     if (start >= 0) {
       const parts = [lines[start].replace(/^Synopsis\s*:?\s*/i, "")];
       for (let i = start + 1; i < lines.length; i++) {
-        if (/^(Premier chapitre|Dernier chapitre|Chapitres disponibles)/i.test(lines[i])) break;
+        if (endOfSynopsis.test(lines[i])) break;
         parts.push(lines[i]);
       }
       description = parts.filter((p) => p.length > 0).join("\n");
@@ -246,7 +314,7 @@ class DefaultExtension extends MProvider {
       .filter((g) => g.length > 0);
     if (genre.length === 0) {
       for (let i = 0; i < lines.length; i++) {
-        if (!/^\d+\s+chapitres?$/i.test(lines[i])) continue;
+        if (!/^\d+\s+(chapitres?|tomes?)$/i.test(lines[i])) continue;
         const found = [];
         for (let j = i + 1; j < rawLines.length && j <= i + 3; j++) {
           if (/^Synopsis/i.test(lines[j])) break;
@@ -262,17 +330,22 @@ class DefaultExtension extends MProvider {
       }
     }
 
-    // Chapters: newest first, as the app expects.
-    const count = this.chapterCount(html);
-    if (count < 1) throw new Error("Impossible de déterminer le nombre de chapitres.");
-    const chapters = [];
-    for (let i = count; i >= 1; i--) {
-      chapters.push({
-        name: "Chapitre " + this.pad3(i),
-        url: novelUrl + "lecture.html?chapitre=" + i,
-        dateUpload: null,
-        scanlator: null,
-      });
+    // Chapters, newest first as the app expects.
+    let chapters = [];
+    if (section === "lightnovels") {
+      chapters = this.volumesOf(doc, html, baseDir);
+      if (chapters.length === 0) throw new Error("Aucun tome trouvé sur la page.");
+    } else {
+      const count = this.chapterCount(html);
+      if (count < 1) throw new Error("Impossible de déterminer le nombre de chapitres.");
+      for (let i = count; i >= 1; i--) {
+        chapters.push({
+          name: "Chapitre " + this.pad3(i),
+          url: novelUrl + "lecture.html?chapitre=" + i,
+          dateUpload: null,
+          scanlator: null,
+        });
+      }
     }
 
     return {
@@ -280,14 +353,28 @@ class DefaultExtension extends MProvider {
       imageUrl,
       description,
       author: field("Auteur"),
-      artist: "",
-      status: this.toStatus(field("Statut")),
+      artist: field("Illustrateur"),
+      status: this.toStatus(field("Stat(?:ut|us)")),
       genre,
       chapters,
     };
   }
 
   async getHtmlContent(name, url) {
+    // Light novel volumes are PDF files, which the app cannot display: give a link.
+    if (/\.pdf(\?|#|$)/i.test(String(url))) {
+      const pdf = /^https?:\/\//i.test(String(url)) ? String(url) : this.source.baseUrl + url;
+      const tome = pdf.match(/tome([\d.\-]+)\.pdf/i);
+      const label = tome ? "Tome " + tome[1].replace("-", ".") : "Ce tome";
+      const safe = pdf.replace(/"/g, "%22");
+      return (
+        "<h2>" + this.escapeHtml(String(name || "")) + " — " + label + "</h2>" +
+        "<p>NovelNeko publie ce tome au format PDF, que Mangayomi ne sait pas afficher.</p>" +
+        "<p>Ouvre-le avec ce lien :</p>" +
+        '<p><a href="' + safe + '">' + this.escapeHtml(pdf) + "</a></p>" +
+        "<p>Si le lien ne s'ouvre pas bien ici, utilise l'option « Ouvrir dans le navigateur » du lecteur, ou copie l'adresse ci-dessus dans ton navigateur.</p>"
+      );
+    }
     const slugMatch = String(url).match(/webnovels\/([^\/?#]+)\//);
     const numberMatch = String(url).match(/[?&]chapitre=(\d+)/);
     if (!slugMatch || !numberMatch) throw new Error("Adresse de chapitre invalide : " + url);
