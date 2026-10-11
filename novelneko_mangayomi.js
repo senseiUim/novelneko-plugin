@@ -6,7 +6,7 @@ const mangayomiSources = [{
   "iconUrl": "https://raw.githubusercontent.com/senseiUim/novelneko-plugin/main/icon.png",
   "typeSource": "single",
   "itemType": 2,
-  "version": "0.0.3",
+  "version": "0.0.4",
   "dateFormat": "",
   "dateFormatLocale": "",
   "pkgPath": "novelneko_mangayomi.js",
@@ -223,6 +223,114 @@ class DefaultExtension extends MProvider {
     };
   }
 
+  // ------------------------------------------- private reading repository
+
+  preference(key, fallback) {
+    try {
+      const value = new SharedPreferences().get(key);
+      const text = value === null || value === undefined ? "" : String(value).trim();
+      return text.length > 0 ? text : fallback;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  readerToken() {
+    return this.preference("github_token", "");
+  }
+
+  readerRepo() {
+    return this.preference("github_repo", "senseiUim/novelneko-lecture");
+  }
+
+  /** "tome4-5.pdf" -> "tome4-5" (same rule as convert.py). */
+  tomeId(url) {
+    const file = String(url).split(/[?#]/)[0].replace(/^.*\//, "").replace(/\.pdf$/i, "");
+    return file.toLowerCase().replace(/[^a-z0-9.\-]/g, "");
+  }
+
+  /** Reads a file of the private repository. null = not found; throws on a bad token. */
+  async readerFile(path) {
+    const url = "https://api.github.com/repos/" + this.readerRepo() + "/contents/" + path;
+    const res = await new Client().get(url, {
+      Authorization: "Bearer " + this.readerToken(),
+      Accept: "application/vnd.github.raw+json",
+      "User-Agent": "mangayomi-novelneko",
+      "X-GitHub-Api-Version": "2022-11-28",
+    });
+    if (res.statusCode === 404) return null;
+    if (res.statusCode === 401 || res.statusCode === 403) {
+      throw new Error("Jeton GitHub refusé ou expiré (HTTP " + res.statusCode + ").");
+    }
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw new Error("HTTP " + res.statusCode + " en lisant " + path);
+    }
+    return this.repairEncoding(res.body);
+  }
+
+  /** Light novel chapters read from the private repository; PDF links for what is missing. */
+  async readerChapters(slug, volumes) {
+    if (!this.readerToken()) return volumes;
+    const marker = this.source.baseUrl + "/lightnovels/" + slug + "/?erreur=";
+    let index = null;
+    try {
+      const text = await this.readerFile("data/" + slug + "/index.json");
+      index = text ? JSON.parse(text) : null;
+    } catch (e) {
+      const message = String(e && e.message ? e.message : e);
+      const bad = /Jeton/.test(message);
+      return [
+        {
+          name: bad ? "⚠ Jeton GitHub refusé ou expiré" : "⚠ Dépôt de lecture illisible",
+          url: marker + (bad ? "jeton" : "depot"),
+          dateUpload: null,
+          scanlator: null,
+        },
+      ].concat(volumes);
+    }
+    if (!index || !Array.isArray(index.tomes)) return volumes;
+
+    const known = {};
+    for (const tome of index.tomes) known[tome.id] = tome;
+    const chapters = [];
+    for (const volume of volumes) {
+      const tome = known[this.tomeId(volume.url)];
+      if (!tome || !Array.isArray(tome.parts) || tome.parts.length === 0) {
+        chapters.push(volume);
+        continue;
+      }
+      for (let i = tome.parts.length - 1; i >= 0; i--) {
+        const part = tome.parts[i];
+        chapters.push({
+          name: volume.name + " — " + part.title,
+          url: volume.url + "?partie=" + part.n,
+          dateUpload: volume.dateUpload,
+          scanlator: null,
+        });
+      }
+    }
+    return chapters;
+  }
+
+  /** Page shown for a volume that is not available in the reading repository. */
+  pdfPage(name, url) {
+    const pdf = /^https?:\/\//i.test(String(url)) ? String(url) : this.source.baseUrl + url;
+    const tome = pdf.match(/tome([\d.\-]+)\.pdf/i);
+    const label = tome ? "Tome " + tome[1].replace("-", ".") : "Ce tome";
+    const safe = pdf.replace(/"/g, "%22");
+    const hint = this.readerToken()
+      ? "<p>Ce tome n'a pas encore été converti dans ton dépôt de lecture (la conversion tourne chaque jour, ou lance-la à la main dans l'onglet Actions de GitHub).</p>"
+      : "<p>Pour lire les tomes directement dans l'application, renseigne ton jeton GitHub dans les réglages de l'extension.</p>";
+    return (
+      "<h2>" + this.escapeHtml(String(name || "")) + " — " + label + "</h2>" +
+      "<p>NovelNeko publie ce tome au format PDF, que Mangayomi ne sait pas afficher.</p>" +
+      hint +
+      "<p>En attendant, ouvre le PDF avec ce lien :</p>" +
+      '<p><a href="' + safe + '">' + this.escapeHtml(pdf) + "</a></p>" +
+      "<p>Si le lien ne s'ouvre pas bien ici, utilise l'option « Ouvrir dans le navigateur » du lecteur.</p>"
+    );
+  }
+
   // ----------------------------------------------------------- novel + text
 
   /** Light novels: the volumes are listed in the page as PDF links, newest first. */
@@ -335,6 +443,7 @@ class DefaultExtension extends MProvider {
     if (section === "lightnovels") {
       chapters = this.volumesOf(doc, html, baseDir);
       if (chapters.length === 0) throw new Error("Aucun tome trouvé sur la page.");
+      chapters = await this.readerChapters(slug, chapters);
     } else {
       const count = this.chapterCount(html);
       if (count < 1) throw new Error("Impossible de déterminer le nombre de chapitres.");
@@ -361,19 +470,21 @@ class DefaultExtension extends MProvider {
   }
 
   async getHtmlContent(name, url) {
-    // Light novel volumes are PDF files, which the app cannot display: give a link.
+    // Light novels: parts converted by the private GitHub repository, else a link to the PDF.
+    const errorMatch = String(url).match(/\/lightnovels\/[^\/?#]+\/\?erreur=(\w+)/);
+    if (errorMatch) {
+      return errorMatch[1] === "jeton"
+        ? "<h2>Jeton GitHub refusé ou expiré</h2><p>Crée un nouveau jeton GitHub (lecture seule, limité à ton dépôt de lecture) puis colle-le dans les réglages de l'extension NovelNeko.</p>"
+        : "<h2>Dépôt de lecture illisible</h2><p>Vérifie le nom du dépôt dans les réglages de l'extension NovelNeko (par exemple senseiUim/novelneko-lecture).</p>";
+    }
     if (/\.pdf(\?|#|$)/i.test(String(url))) {
-      const pdf = /^https?:\/\//i.test(String(url)) ? String(url) : this.source.baseUrl + url;
-      const tome = pdf.match(/tome([\d.\-]+)\.pdf/i);
-      const label = tome ? "Tome " + tome[1].replace("-", ".") : "Ce tome";
-      const safe = pdf.replace(/"/g, "%22");
-      return (
-        "<h2>" + this.escapeHtml(String(name || "")) + " — " + label + "</h2>" +
-        "<p>NovelNeko publie ce tome au format PDF, que Mangayomi ne sait pas afficher.</p>" +
-        "<p>Ouvre-le avec ce lien :</p>" +
-        '<p><a href="' + safe + '">' + this.escapeHtml(pdf) + "</a></p>" +
-        "<p>Si le lien ne s'ouvre pas bien ici, utilise l'option « Ouvrir dans le navigateur » du lecteur, ou copie l'adresse ci-dessus dans ton navigateur.</p>"
-      );
+      const partMatch = String(url).match(/lightnovels\/([^\/?#]+)\/volumes\/([^\/?#]+)\.pdf\?partie=(\d+)/i);
+      if (partMatch && this.readerToken()) {
+        const number = ("0" + partMatch[3]).slice(-2);
+        const text = await this.readerFile("data/" + partMatch[1] + "/" + this.tomeId(partMatch[2]) + "/" + number + ".html");
+        if (text) return text;
+      }
+      return this.pdfPage(name, String(url).split("?")[0]);
     }
     const slugMatch = String(url).match(/webnovels\/([^\/?#]+)\//);
     const numberMatch = String(url).match(/[?&]chapitre=(\d+)/);
@@ -432,6 +543,29 @@ class DefaultExtension extends MProvider {
   }
 
   getSourcePreferences() {
-    throw new Error("getSourcePreferences not implemented");
+    return [
+      {
+        key: "github_token",
+        editTextPreference: {
+          title: "Jeton GitHub (lecture des light novels)",
+          summary: "Colle ici ton jeton GitHub en lecture seule",
+          value: "",
+          dialogTitle: "Jeton GitHub",
+          dialogMessage: "Jeton à grain fin, lecture seule (Contents), limité à ton dépôt de lecture.",
+          text: "",
+        },
+      },
+      {
+        key: "github_repo",
+        editTextPreference: {
+          title: "Dépôt de lecture",
+          summary: "Nom du dépôt privé, au format propriétaire/dépôt",
+          value: "senseiUim/novelneko-lecture",
+          dialogTitle: "Dépôt de lecture",
+          dialogMessage: "Par exemple : senseiUim/novelneko-lecture",
+          text: "senseiUim/novelneko-lecture",
+        },
+      },
+    ];
   }
 }
