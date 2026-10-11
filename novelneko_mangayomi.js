@@ -6,7 +6,7 @@ const mangayomiSources = [{
   "iconUrl": "https://raw.githubusercontent.com/senseiUim/novelneko-plugin/main/icon.png",
   "typeSource": "single",
   "itemType": 2,
-  "version": "0.0.4",
+  "version": "0.0.5",
   "dateFormat": "",
   "dateFormatLocale": "",
   "pkgPath": "novelneko_mangayomi.js",
@@ -271,23 +271,9 @@ class DefaultExtension extends MProvider {
   /** Light novel chapters read from the private repository; PDF links for what is missing. */
   async readerChapters(slug, volumes) {
     if (!this.readerToken()) return volumes;
-    const marker = this.source.baseUrl + "/lightnovels/" + slug + "/?erreur=";
     let index = null;
-    try {
-      const text = await this.readerFile("data/" + slug + "/index.json");
-      index = text ? JSON.parse(text) : null;
-    } catch (e) {
-      const message = String(e && e.message ? e.message : e);
-      const bad = /Jeton/.test(message);
-      return [
-        {
-          name: bad ? "⚠ Jeton GitHub refusé ou expiré" : "⚠ Dépôt de lecture illisible",
-          url: marker + (bad ? "jeton" : "depot"),
-          dateUpload: null,
-          scanlator: null,
-        },
-      ].concat(volumes);
-    }
+    const text = await this.readerFile("data/" + slug + "/index.json");
+    index = text ? JSON.parse(text) : null;
     if (!index || !Array.isArray(index.tomes)) return volumes;
 
     const known = {};
@@ -305,7 +291,9 @@ class DefaultExtension extends MProvider {
           name: volume.name + " — " + part.title,
           url: volume.url + "?partie=" + part.n,
           dateUpload: volume.dateUpload,
-          scanlator: null,
+          // Mangayomi merges chapters whose names carry the same first number ("Tome 1 ...");
+          // a distinct scanlator per part keeps every part of the tome in the list.
+          scanlator: "Partie " + part.n + "/" + tome.parts.length,
         });
       }
     }
@@ -471,12 +459,6 @@ class DefaultExtension extends MProvider {
 
   async getHtmlContent(name, url) {
     // Light novels: parts converted by the private GitHub repository, else a link to the PDF.
-    const errorMatch = String(url).match(/\/lightnovels\/[^\/?#]+\/\?erreur=(\w+)/);
-    if (errorMatch) {
-      return errorMatch[1] === "jeton"
-        ? "<h2>Jeton GitHub refusé ou expiré</h2><p>Crée un nouveau jeton GitHub (lecture seule, limité à ton dépôt de lecture) puis colle-le dans les réglages de l'extension NovelNeko.</p>"
-        : "<h2>Dépôt de lecture illisible</h2><p>Vérifie le nom du dépôt dans les réglages de l'extension NovelNeko (par exemple senseiUim/novelneko-lecture).</p>";
-    }
     if (/\.pdf(\?|#|$)/i.test(String(url))) {
       const partMatch = String(url).match(/lightnovels\/([^\/?#]+)\/volumes\/([^\/?#]+)\.pdf\?partie=(\d+)/i);
       if (partMatch && this.readerToken()) {
