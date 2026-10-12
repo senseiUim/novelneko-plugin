@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=0.5, maximum-scale=6, user-scalable=yes">
+<meta name="referrer" content="no-referrer">
+<title>Illustration</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #000; color: #ddd; font: 16px/1.4 system-ui, sans-serif; }
+  #bar { position: sticky; top: 0; z-index: 2; display: flex; gap: 8px; align-items: center;
+         justify-content: space-between; padding: 8px 12px; background: rgba(20,20,20,.92); }
+  #bar button { flex: 0 0 auto; min-width: 44px; height: 40px; border: 0; border-radius: 8px;
+                background: #2b2b2b; color: #fff; font-size: 18px; }
+  #bar button:disabled { opacity: .35; }
+  #label { flex: 1; text-align: center; font-size: 14px; color: #bbb; }
+  #stage { display: flex; justify-content: center; align-items: flex-start; min-height: 60vh; }
+  #stage img { display: block; width: 100%; height: auto; max-width: 1200px; }
+  #msg { padding: 24px 16px; text-align: center; color: #ccc; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="prev" aria-label="Illustration précédente">&#8249;</button>
+  <div id="label">Chargement…</div>
+  <button id="next" aria-label="Illustration suivante">&#8250;</button>
+</div>
+<div id="stage"><div id="msg">Chargement de l'illustration…</div></div>
+<script>
+(function () {
+  "use strict";
+  // Adresse : viewer.html#r=proprietaire/depot&p=data/roman/tome/img/005.jpg&t=jeton
+  var params = {};
+  location.hash.replace(/^#/, "").split("&").forEach(function (pair) {
+    var i = pair.indexOf("=");
+    if (i > 0) params[pair.slice(0, i)] = decodeURIComponent(pair.slice(i + 1));
+  });
+  var repo = params.r, path = params.p, token = params.t;
+  var stage = document.getElementById("stage");
+  var label = document.getElementById("label");
+  var prev = document.getElementById("prev");
+  var next = document.getElementById("next");
+  var shown = null;
+
+  function say(text) {
+    stage.innerHTML = "";
+    var div = document.createElement("div");
+    div.id = "msg";
+    div.textContent = text;
+    stage.appendChild(div);
+  }
+
+  function parts(p) {
+    var m = /^(.*\/)(\d+)\.(jpg|jpeg|png)$/i.exec(p || "");
+    return m ? { dir: m[1], n: parseInt(m[2], 10), width: m[2].length, ext: m[3] } : null;
+  }
+
+  function fileUrl(p) {
+    return "https://api.github.com/repos/" + repo + "/contents/" + p.split("/").map(encodeURIComponent).join("/");
+  }
+
+  async function load(p) {
+    var res = await fetch(fileUrl(p), {
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Accept": "application/vnd.github.raw+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+      }
+    });
+    if (res.status === 401 || res.status === 403) throw new Error("auth");
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error("http " + res.status);
+    return await res.blob();
+  }
+
+  /** Same number with the other extension (a few images are PNG). */
+  async function find(info, n) {
+    var exts = [info.ext.toLowerCase(), "jpg", "png", "jpeg"].filter(function (e, i, a) { return a.indexOf(e) === i; });
+    for (var i = 0; i < exts.length; i++) {
+      var name = info.dir + String(n).padStart(info.width, "0") + "." + exts[i];
+      var blob = await load(name);
+      if (blob) return { path: name, blob: blob };
+    }
+    return null;
+  }
+
+  async function show(n, direction) {
+    var info = parts(path);
+    if (!info) return say("Adresse d'illustration invalide.");
+    if (n < 1) return;
+    label.textContent = "Illustration " + n;
+    prev.disabled = next.disabled = true;
+    try {
+      var found = await find(info, n);
+      if (!found) {
+        if (direction && shown) { prev.disabled = shown <= 1; next.disabled = false; label.textContent = "Illustration " + shown; return; }
+        return say("Illustration introuvable.");
+      }
+      if (shown !== null) { var old = stage.querySelector("img"); if (old) URL.revokeObjectURL(old.src); }
+      stage.innerHTML = "";
+      var img = document.createElement("img");
+      img.alt = "Illustration " + n;
+      img.src = URL.createObjectURL(found.blob);
+      stage.appendChild(img);
+      shown = n;
+      label.textContent = "Illustration " + n;
+      prev.disabled = n <= 1;
+      next.disabled = false;
+      window.scrollTo(0, 0);
+    } catch (e) {
+      prev.disabled = next.disabled = true;
+      say(e && e.message === "auth"
+        ? "Jeton GitHub refusé ou expiré : mets-le à jour dans les réglages de l'extension NovelNeko."
+        : "Impossible de charger l'illustration (" + (e && e.message ? e.message : e) + ").");
+    }
+  }
+
+  prev.addEventListener("click", function () { if (shown > 1) show(shown - 1, -1); });
+  next.addEventListener("click", function () { if (shown !== null) show(shown + 1, 1); });
+
+  if (!repo || !path || !token) {
+    label.textContent = "";
+    prev.disabled = next.disabled = true;
+    say("Adresse incomplète : ouvre l'illustration depuis le texte du roman, dans Mangayomi.");
+  } else {
+    var info0 = parts(path);
+    if (info0) show(info0.n, 0); else say("Adresse d'illustration invalide.");
+  }
+})();
+</script>
+</body>
+</html>

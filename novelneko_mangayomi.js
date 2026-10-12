@@ -6,7 +6,7 @@ const mangayomiSources = [{
   "iconUrl": "https://raw.githubusercontent.com/senseiUim/novelneko-plugin/main/icon.png",
   "typeSource": "single",
   "itemType": 2,
-  "version": "0.0.5",
+  "version": "0.0.6",
   "dateFormat": "",
   "dateFormatLocale": "",
   "pkgPath": "novelneko_mangayomi.js",
@@ -239,6 +239,25 @@ class DefaultExtension extends MProvider {
     return this.preference("github_token", "");
   }
 
+  /** Page (GitHub Pages) that shows an illustration full screen. */
+  viewerUrl() {
+    return this.preference("viewer_url", "https://senseiuim.github.io/novelneko-plugin/viewer.html");
+  }
+
+  /** Turns the converter's illu://001.jpg links into links to the viewer page. */
+  linkIllustrations(html, slug, tomeId) {
+    const base = this.viewerUrl();
+    const token = this.readerToken();
+    const repo = this.readerRepo();
+    return html.replace(/href="illu:\/\/([^"]+)"/g, (all, file) => {
+      const path = "data/" + slug + "/" + tomeId + "/img/" + file;
+      return (
+        'href="' + base + "#r=" + encodeURIComponent(repo) + "&amp;p=" + encodeURIComponent(path) +
+        "&amp;t=" + encodeURIComponent(token) + '"'
+      );
+    });
+  }
+
   readerRepo() {
     return this.preference("github_repo", "senseiUim/novelneko-lecture");
   }
@@ -290,7 +309,8 @@ class DefaultExtension extends MProvider {
         chapters.push({
           name: volume.name + " — " + part.title,
           url: volume.url + "?partie=" + part.n,
-          dateUpload: volume.dateUpload,
+          // one second apart so that sorting by date keeps the parts in reading order
+          dateUpload: volume.dateUpload ? String(parseInt(volume.dateUpload, 10) + part.n * 1000) : null,
           // Mangayomi merges chapters whose names carry the same first number ("Tome 1 ...");
           // a distinct scanlator per part keeps every part of the tome in the list.
           scanlator: "Partie " + part.n + "/" + tome.parts.length,
@@ -464,7 +484,7 @@ class DefaultExtension extends MProvider {
       if (partMatch && this.readerToken()) {
         const number = ("0" + partMatch[3]).slice(-2);
         const text = await this.readerFile("data/" + partMatch[1] + "/" + this.tomeId(partMatch[2]) + "/" + number + ".html");
-        if (text) return text;
+        if (text) return this.linkIllustrations(text, partMatch[1], this.tomeId(partMatch[2]));
       }
       return this.pdfPage(name, String(url).split("?")[0]);
     }
@@ -535,6 +555,17 @@ class DefaultExtension extends MProvider {
           dialogTitle: "Jeton GitHub",
           dialogMessage: "Jeton à grain fin, lecture seule (Contents), limité à ton dépôt de lecture.",
           text: "",
+        },
+      },
+      {
+        key: "viewer_url",
+        editTextPreference: {
+          title: "Page d'affichage des illustrations",
+          summary: "Adresse de viewer.html sur ton GitHub Pages",
+          value: "https://senseiuim.github.io/novelneko-plugin/viewer.html",
+          dialogTitle: "Page d'affichage des illustrations",
+          dialogMessage: "Par exemple : https://senseiuim.github.io/novelneko-plugin/viewer.html",
+          text: "https://senseiuim.github.io/novelneko-plugin/viewer.html",
         },
       },
       {
