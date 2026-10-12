@@ -6,7 +6,7 @@ const mangayomiSources = [{
   "iconUrl": "https://raw.githubusercontent.com/senseiUim/novelneko-plugin/main/icon.png",
   "typeSource": "single",
   "itemType": 2,
-  "version": "0.0.7",
+  "version": "0.0.8",
   "dateFormat": "",
   "dateFormatLocale": "",
   "pkgPath": "novelneko_mangayomi.js",
@@ -143,7 +143,7 @@ class DefaultExtension extends MProvider {
       list.push({
         name: entry.title,
         imageUrl: entry.image ? this.toAbsolute(entry.image, "/" + section + "/") : "",
-        link: this.source.baseUrl + "/" + section + "/" + slug + "/",
+        link: this.source.baseUrl + "/" + section + "/" + slug + "/" + (section === "lightnovels" ? "?lecture=2" : ""),
       });
     }
     return list;
@@ -279,10 +279,12 @@ class DefaultExtension extends MProvider {
     const known = {};
     for (const tome of index.tomes) known[tome.id] = tome;
     const chapters = [];
-    for (const volume of volumes) {
+    for (let vi = 0; vi < volumes.length; vi++) {
+      const volume = volumes[vi];
+      const rank = volumes.length - 1 - vi; // oldest tome = 0
       const tome = known[this.tomeId(volume.url)];
       if (!tome || !Array.isArray(tome.parts) || tome.parts.length === 0) {
-        chapters.push(volume);
+        chapters.push(Object.assign({}, volume, { dateUpload: String(1577836800000 + rank * 86400000) }));
         continue;
       }
       for (let i = tome.parts.length - 1; i >= 0; i--) {
@@ -291,7 +293,7 @@ class DefaultExtension extends MProvider {
           name: volume.name + " — " + part.title,
           url: volume.url + "?partie=" + part.n,
           // one second apart so that sorting by date keeps the parts in reading order
-          dateUpload: volume.dateUpload ? String(parseInt(volume.dateUpload, 10) + part.n * 1000) : null,
+          dateUpload: String(1577836800000 + rank * 86400000 + part.n * 1000),
           // Mangayomi merges chapters whose names carry the same first number ("Tome 1 ...");
           // a distinct scanlator per part keeps every part of the tome in the list.
           scanlator: "Partie " + part.n + "/" + tome.parts.length,
